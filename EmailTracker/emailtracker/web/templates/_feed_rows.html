@@ -1,0 +1,24 @@
+{% if not messages %}
+<tr class="empty"><td colspan="5">No messages match the current filters.</td></tr>
+{% else %}
+{% for m in messages %}
+<tr class="row-{{ m.direction }}"
+    onclick="window.location='/thread/{{ m.conversation_id }}'"
+    title="Click to open conversation">
+  <td>
+    <span class="dir dir-{{ m.direction }}">{{ 'IN' if m.direction == 'in' else 'OUT' }}</span>
+    {% if m.is_reply %}<span class="tag">RE</span>{% endif %}
+    {% if m.is_forward %}<span class="tag">FW</span>{% endif %}
+  </td>
+  <td>
+    <div class="sender">{{ m.sender_name or m.sender_address }}</div>
+    {% if m.sender_name and m.sender_address %}
+    <div class="sender-addr">{{ m.sender_address }}</div>
+    {% endif %}
+  </td>
+  <td class="recipients">{{ format_recipients(m.to_recipients) }}</td>
+  <td class="subject">{{ m.subject }}</td>
+  <td class="when">{{ m.received_at or '' }}</td>
+</tr>
+{% endfor %}
+{% endif %}

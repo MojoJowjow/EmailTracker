@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Thread · EmailTracker{% endblock %}
+{% block content %}
+<div class="card">
+  <div class="card-header">
+    <h2>Conversation</h2>
+    <a href="/" class="back">&larr; Back to dashboard</a>
+  </div>
+  <p class="conv-id">conversationId: <code>{{ conversation_id }}</code></p>
+  <ol class="thread">
+    {% for m in messages %}
+    <li class="thread-item thread-{{ m.direction }}">
+      <div class="thread-head">
+        <span class="dir dir-{{ m.direction }}">{{ 'IN' if m.direction == 'in' else 'OUT' }}</span>
+        <span class="when">{{ m.received_at }}</span>
+      </div>
+      <div class="thread-body">
+        <div><strong>From:</strong> {{ m.sender_name or '' }} &lt;{{ m.sender_address }}&gt;</div>
+        <div><strong>To:</strong> {{ format_recipients(m.to_recipients, 20) }}</div>
+        {% if m.cc_recipients %}
+        <div><strong>Cc:</strong> {{ format_recipients(m.cc_recipients, 20) }}</div>
+        {% endif %}
+        <div><strong>Subject:</strong> {{ m.subject }}</div>
+      </div>
+    </li>
+    {% endfor %}
+  </ol>
+</div>
+{% endblock %}

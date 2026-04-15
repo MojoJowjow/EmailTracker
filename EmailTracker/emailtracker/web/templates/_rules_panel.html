@@ -1,0 +1,33 @@
+{% if not rules %}
+<p class="empty">No filter rules yet. Feed is showing everything.</p>
+{% else %}
+<ul class="rules">
+  {% for r in rules %}
+  <li class="rule {% if not r.enabled %}disabled{% endif %}">
+    <div class="rule-main">
+      <div class="rule-name">{{ r.name }}</div>
+      <div class="rule-patterns">
+        {% if r.sender_pattern %}<span class="pat">from: <code>{{ r.sender_pattern }}</code></span>{% endif %}
+        {% if r.subject_pattern %}<span class="pat">subject: <code>{{ r.subject_pattern }}</code></span>{% endif %}
+      </div>
+    </div>
+    <div class="rule-actions">
+      <button type="button"
+              hx-post="/rules/{{ r.id }}/toggle"
+              hx-target="#rules-panel"
+              hx-swap="innerHTML">
+        {{ 'Disable' if r.enabled else 'Enable' }}
+      </button>
+      <button type="button"
+              class="danger"
+              hx-delete="/rules/{{ r.id }}"
+              hx-target="#rules-panel"
+              hx-swap="innerHTML"
+              hx-confirm="Delete rule '{{ r.name }}'?">
+        Delete
+      </button>
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
