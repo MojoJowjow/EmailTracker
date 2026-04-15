@@ -35,7 +35,9 @@ Continuously monitors a shared Microsoft 365 mailbox and displays tracked corres
 
 ### 2. Confirm access to the shared mailbox
 
-The signed-in user must have **Read** permission on the shared mailbox in Exchange (the "Add another mailbox" access you normally need to open it in Outlook). Without that, Graph will return 403 even with `Mail.Read.Shared`.
+The signed-in user must have **Read** permission on the shared mailbox in Exchange — the same access you need to open it in Outlook. Without that, Graph will return 403 even with `Mail.Read.Shared` granted.
+
+> **Already using the shared mailbox in Outlook?** You're done with this step — if the mailbox shows up in your Outlook folder list, you already have the Exchange permissions EmailTracker needs. Note that this does **not** replace step 1: Outlook signs in through Microsoft's own client, but a custom program like EmailTracker still needs its own app registration to call Microsoft Graph on your behalf.
 
 ### 3. Install and configure
 
