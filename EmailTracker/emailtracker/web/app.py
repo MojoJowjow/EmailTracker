@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -10,9 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .. import db
-from ..auth import GraphAuth
 from ..config import load_settings
-from ..graph_client import GraphClient
 from ..poller import Poller
 from . import routes
 
@@ -33,28 +30,20 @@ async def lifespan(app: FastAPI):
     conn = db.connect(settings.db_path)
     db.init_schema(conn)
 
-    auth = GraphAuth(settings)
-    graph = GraphClient(auth, settings.shared_mailbox)
-    poller = Poller(settings, conn, graph)
+    poller = Poller(settings, conn)
 
     app.state.settings = settings
     app.state.db = conn
-    app.state.graph = graph
     app.state.poller = poller
     app.state.templates = TEMPLATES
 
-    task = asyncio.create_task(poller.run_forever(), name="emailtracker-poller")
-    log.info("Poller task started")
+    poller.start()
+    log.info("Poller thread started (mailbox=%s)", settings.shared_mailbox)
     try:
         yield
     finally:
         log.info("Shutting down poller...")
-        poller.stop()
-        try:
-            await asyncio.wait_for(task, timeout=10)
-        except asyncio.TimeoutError:
-            task.cancel()
-        await graph.aclose()
+        poller.stop(timeout=15)
         conn.close()
         log.info("Shutdown complete")
 

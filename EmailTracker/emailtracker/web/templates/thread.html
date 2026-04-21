@@ -3,27 +3,63 @@
 {% block content %}
 <div class="card">
   <div class="card-header">
-    <h2>Conversation</h2>
+    <div>
+      <h2>Conversation Timeline</h2>
+      <p class="thread-subject">{{ thread_subject }}</p>
+    </div>
     <a href="/" class="back">&larr; Back to dashboard</a>
   </div>
-  <p class="conv-id">conversationId: <code>{{ conversation_id }}</code></p>
-  <ol class="thread">
+
+  <div class="timeline-summary">
+    <div class="tl-stat">
+      <span class="tl-stat-val">{{ messages | length }}</span>
+      <span class="tl-stat-label">Messages</span>
+    </div>
+    <div class="tl-stat">
+      <span class="tl-stat-val">{{ messages | selectattr('direction', 'equalto', 'in') | list | length }}</span>
+      <span class="tl-stat-label">Inbound</span>
+    </div>
+    <div class="tl-stat">
+      <span class="tl-stat-val">{{ messages | selectattr('direction', 'equalto', 'out') | list | length }}</span>
+      <span class="tl-stat-label">Outbound</span>
+    </div>
+    {% set awaiting = messages | selectattr('status', 'equalto', 'Awaiting Reply') | list | length %}
+    <div class="tl-stat">
+      <span class="tl-stat-val {% if awaiting > 0 %}highlight-awaiting{% endif %}">{{ awaiting }}</span>
+      <span class="tl-stat-label">Awaiting Reply</span>
+    </div>
+  </div>
+
+  <div class="timeline">
+    <div class="timeline-line"></div>
     {% for m in messages %}
-    <li class="thread-item thread-{{ m.direction }}">
-      <div class="thread-head">
-        <span class="dir dir-{{ m.direction }}">{{ 'IN' if m.direction == 'in' else 'OUT' }}</span>
-        <span class="when">{{ m.received_at }}</span>
+    <div class="tl-item tl-{{ m.direction }}">
+      <div class="tl-dot tl-dot-{{ m.direction }}"></div>
+      <div class="tl-card">
+        <div class="tl-card-head">
+          <div class="tl-left">
+            <span class="dir dir-{{ m.direction }}">{{ 'IN' if m.direction == 'in' else 'OUT' }}</span>
+            <span class="tl-status {{ m.status_class }}">{{ m.status }}</span>
+          </div>
+          <span class="tl-time">{{ m.received_at or '' }}</span>
+        </div>
+        <div class="tl-card-body">
+          <div class="tl-field"><span class="tl-label">From</span> {{ m.sender_name or '' }} &lt;{{ m.sender_address }}&gt;</div>
+          <div class="tl-field"><span class="tl-label">To</span> {{ format_recipients(m.to_recipients, 10) }}</div>
+          {% if m.cc_recipients %}
+          <div class="tl-field"><span class="tl-label">Cc</span> {{ format_recipients(m.cc_recipients, 10) }}</div>
+          {% endif %}
+          <div class="tl-field"><span class="tl-label">Subject</span> {{ m.subject }}</div>
+          {% if m.has_attachments %}<div class="tl-field"><span class="attachment-badge">Letter Attached</span></div>{% endif %}
+          {% if m.requires_reply %}<div class="tl-field"><span class="needs-reply-badge">Requires reply from Francis Saturnino Juan</span></div>{% endif %}
+        </div>
       </div>
-      <div class="thread-body">
-        <div><strong>From:</strong> {{ m.sender_name or '' }} &lt;{{ m.sender_address }}&gt;</div>
-        <div><strong>To:</strong> {{ format_recipients(m.to_recipients, 20) }}</div>
-        {% if m.cc_recipients %}
-        <div><strong>Cc:</strong> {{ format_recipients(m.cc_recipients, 20) }}</div>
-        {% endif %}
-        <div><strong>Subject:</strong> {{ m.subject }}</div>
-      </div>
-    </li>
+    </div>
     {% endfor %}
-  </ol>
+    <div class="tl-end">
+      <div class="tl-dot tl-dot-end"></div>
+      <span class="tl-end-label">End of thread</span>
+    </div>
+  </div>
 </div>
 {% endblock %}

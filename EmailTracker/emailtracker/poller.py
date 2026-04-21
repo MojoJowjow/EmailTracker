@@ -1,118 +1,129 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import sqlite3
-from typing import Any
+import threading
+from datetime import datetime, timedelta, timezone
 
 from . import db
 from .config import Settings
-from .graph_client import GraphClient, GraphDeltaGone
+from .outlook_reader import OutlookError, OutlookReader
 
 log = logging.getLogger(__name__)
 
-# (folder_key, graph_well_known_folder_name, direction)
-FOLDERS: list[tuple[str, str, str]] = [
-    ("inbox", "inbox", "in"),
-    ("sentitems", "sentitems", "out"),
+FOLDERS: list[tuple[str, str]] = [
+    ("inbox", "in"),
+    ("sentitems", "out"),
 ]
 
 _INITIAL_BACKOFF = 5.0
 _MAX_BACKOFF = 300.0
 
 
-def _map_message(raw: dict[str, Any], folder_key: str, direction: str) -> dict[str, Any]:
-    from_field = raw.get("from") or raw.get("sender") or {}
-    email = (from_field or {}).get("emailAddress") or {}
-    subject = raw.get("subject") or ""
-    received_at = raw.get("receivedDateTime") or raw.get("sentDateTime")
-    subject_lower = subject.lower()
-    return {
-        "id": raw["id"],
-        "conversation_id": raw.get("conversationId"),
-        "direction": direction,
-        "folder": folder_key,
-        "sender_name": email.get("name") or "",
-        "sender_address": email.get("address") or "",
-        "to_recipients": db.serialize_recipients(raw.get("toRecipients")),
-        "cc_recipients": db.serialize_recipients(raw.get("ccRecipients")),
-        "bcc_recipients": db.serialize_recipients(raw.get("bccRecipients")),
-        "subject": subject,
-        "received_at": received_at,
-        "is_reply": 1 if subject_lower.startswith("re:") else 0,
-        "is_forward": 1 if subject_lower.startswith(("fw:", "fwd:")) else 0,
-        "ingested_at": db.now_utc_iso(),
-    }
+def _parse_iso(s: str | None) -> datetime | None:
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        return None
 
 
 class Poller:
-    def __init__(
-        self,
-        settings: Settings,
-        conn: sqlite3.Connection,
-        graph: GraphClient,
-    ) -> None:
+    """Threaded poller that reads from Outlook via COM and writes to SQLite.
+
+    COM must be initialized on the same thread that calls Outlook, so the
+    poller runs in a dedicated daemon thread rather than an asyncio task.
+    """
+
+    def __init__(self, settings: Settings, conn: sqlite3.Connection) -> None:
         self._settings = settings
         self._conn = conn
-        self._graph = graph
-        self._stop = asyncio.Event()
-        self._backoff = _INITIAL_BACKOFF
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
 
-    async def run_forever(self) -> None:
-        log.info("Poller starting (interval=%ss)", self._settings.poll_interval_seconds)
-        while not self._stop.is_set():
-            try:
-                await self._tick()
-                self._backoff = _INITIAL_BACKOFF
-                await self._wait(self._settings.poll_interval_seconds)
-            except asyncio.CancelledError:
-                break
-            except Exception as exc:  # noqa: BLE001
-                log.exception("Poller tick failed")
-                for folder_key, _, _ in FOLDERS:
-                    try:
-                        db.save_sync_error(self._conn, folder_key, f"{type(exc).__name__}: {exc}")
-                    except Exception:  # noqa: BLE001
-                        log.exception("Failed to write sync error for %s", folder_key)
-                await self._wait(self._backoff)
-                self._backoff = min(self._backoff * 2, _MAX_BACKOFF)
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(
+            target=self._run, name="emailtracker-poller", daemon=True
+        )
+        self._thread.start()
 
-    async def _wait(self, seconds: float) -> None:
-        try:
-            await asyncio.wait_for(self._stop.wait(), timeout=seconds)
-        except asyncio.TimeoutError:
-            pass
-
-    def stop(self) -> None:
+    def stop(self, timeout: float = 10.0) -> None:
         self._stop.set()
+        t = self._thread
+        if t is not None:
+            t.join(timeout=timeout)
 
-    async def _tick(self) -> None:
-        for folder_key, graph_folder, direction in FOLDERS:
-            await self._sync_folder(folder_key, graph_folder, direction)
-
-    async def _sync_folder(self, folder_key: str, graph_folder: str, direction: str) -> None:
-        state = db.get_sync_state(self._conn, folder_key)
-        delta_link = state["delta_link"] if state else None
-
+    def _run(self) -> None:
+        log.info(
+            "Poller thread starting (interval=%ss, mailbox=%s)",
+            self._settings.poll_interval_seconds,
+            self._settings.shared_mailbox,
+        )
+        reader = OutlookReader(self._settings.shared_mailbox)
         try:
-            final_delta: str | None = None
-            total = 0
-            async for page, page_delta in self._graph.list_messages_delta(graph_folder, delta_link):
-                if page:
-                    with db.transaction(self._conn):
-                        for raw in page:
-                            if raw.get("@removed"):
-                                continue
-                            row = _map_message(raw, folder_key, direction)
-                            db.upsert_message(self._conn, row)
-                            total += 1
-                if page_delta:
-                    final_delta = page_delta
-            db.save_sync_success(self._conn, folder_key, final_delta)
-            if total:
-                log.info("[%s] upserted %d messages", folder_key, total)
-        except GraphDeltaGone:
-            log.warning("[%s] delta link expired; forcing full resync next tick", folder_key)
-            db.clear_delta_link(self._conn, folder_key)
-            db.save_sync_error(self._conn, folder_key, "delta link expired; will full-resync")
-            raise
+            reader.connect()
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Failed to connect to Outlook")
+            msg = f"{type(exc).__name__}: {exc}"
+            for folder_key, _ in FOLDERS:
+                try:
+                    db.save_sync_error(self._conn, folder_key, msg)
+                except Exception:  # noqa: BLE001
+                    log.exception("Failed to persist connect error")
+            reader.disconnect()
+            return
+
+        backoff = _INITIAL_BACKOFF
+        try:
+            while not self._stop.is_set():
+                try:
+                    self._tick(reader)
+                    backoff = _INITIAL_BACKOFF
+                    if self._stop.wait(timeout=self._settings.poll_interval_seconds):
+                        break
+                except OutlookError as exc:
+                    log.exception("Outlook error during tick")
+                    self._record_error(f"{type(exc).__name__}: {exc}")
+                    if self._stop.wait(timeout=backoff):
+                        break
+                    backoff = min(backoff * 2, _MAX_BACKOFF)
+                except Exception as exc:  # noqa: BLE001
+                    log.exception("Unexpected error during tick")
+                    self._record_error(f"{type(exc).__name__}: {exc}")
+                    if self._stop.wait(timeout=backoff):
+                        break
+                    backoff = min(backoff * 2, _MAX_BACKOFF)
+        finally:
+            reader.disconnect()
+            log.info("Poller thread exiting")
+
+    def _record_error(self, msg: str) -> None:
+        for folder_key, _ in FOLDERS:
+            try:
+                db.save_sync_error(self._conn, folder_key, msg)
+            except Exception:  # noqa: BLE001
+                log.exception("Failed to persist error for %s", folder_key)
+
+    def _tick(self, reader: OutlookReader) -> None:
+        initial_cutoff = datetime.now(timezone.utc) - timedelta(
+            days=self._settings.initial_sync_days
+        )
+        for folder_key, direction in FOLDERS:
+            state = db.get_sync_state(self._conn, folder_key)
+            since = _parse_iso(state["watermark"] if state else None) or initial_cutoff
+
+            max_seen = since
+            count = 0
+            with db.transaction(self._conn):
+                for row in reader.iter_since(folder_key, since, direction):
+                    db.upsert_message(self._conn, row)
+                    count += 1
+                    r_dt = _parse_iso(row.get("received_at"))
+                    if r_dt and r_dt > max_seen:
+                        max_seen = r_dt
+            db.save_sync_success(self._conn, folder_key, max_seen.isoformat())
+            if count:
+                log.info("[%s] upserted %d messages (new watermark=%s)", folder_key, count, max_seen.isoformat())

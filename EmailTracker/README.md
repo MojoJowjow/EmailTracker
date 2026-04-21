@@ -1,48 +1,28 @@
 # EmailTracker
 
-Continuously monitors a shared Microsoft 365 mailbox and displays tracked correspondence in a local web dashboard.
+Continuously monitors a shared Microsoft Outlook mailbox and displays tracked correspondence in a local web dashboard.
 
 - Tracks **sender, recipients, subject, timestamp** for every inbound and outbound message in the shared mailbox.
-- Links inbound messages to the replies and forwards that go out afterward via Graph `conversationId` — click a row to see the entire back-and-forth.
+- Links inbound messages to the replies and forwards that go out afterward — click a row to see the entire back-and-forth.
 - **User-defined filter rules** by sender pattern and/or subject pattern. Rules are applied at display time (history is never lost).
-- No LLM / cloud AI — purely a deterministic tracker running locally.
+- Reads directly from your local Outlook client via COM — **no Azure AD, no app registration, no Microsoft Graph tokens**. If the mailbox shows up in your Outlook folder list, EmailTracker can read it.
 
 ## Requirements
 
-- Windows / macOS / Linux
+- Windows 10/11
+- Microsoft Outlook (Classic — "New Outlook" doesn't expose COM), already signed in with the shared mailbox visible in your folder list
 - Python 3.11+
-- A shared mailbox on Microsoft 365 that the signed-in user has access to
-- An Entra ID (Azure AD) **app registration** in the tenant — see setup below
 
-## First-time setup
+## How it works
 
-### 1. Register an app in Microsoft Entra ID
+Outlook exposes its running instance as a COM automation server. EmailTracker dispatches `Outlook.Application`, resolves the shared mailbox by its SMTP address, and enumerates the **Inbox** and **Sent Items** folders on a background thread every `POLL_INTERVAL_SECONDS` (default 60s). Only metadata is stored — bodies and attachments are never persisted.
 
-1. Sign in to <https://entra.microsoft.com> and go to **Identity → Applications → App registrations → New registration**.
-2. Name: `EmailTracker` (anything is fine).
-3. **Supported account types:** *Accounts in this organizational directory only*.
-4. **Redirect URI:** leave blank for now (device-code flow doesn't need one).
-5. Click **Register**.
-6. On the overview page, copy the **Application (client) ID** and **Directory (tenant) ID** — these go into `.env`.
-7. Go to **Authentication** → enable **Allow public client flows: Yes** → Save. (Required for device-code sign-in.)
-8. Go to **API permissions → Add a permission → Microsoft Graph → Delegated permissions**, and add:
-   - `Mail.Read`
-   - `Mail.Read.Shared`
-   - `offline_access` (added automatically by MSAL)
-9. If you're a tenant admin, click **Grant admin consent** so users don't have to consent individually.
+This means **Outlook has to be running on the same machine as EmailTracker** while the service is polling. If you close Outlook, the poller will error and the dashboard will show a red status; reopen Outlook and it recovers on the next tick.
 
-> If your IT team manages app registrations, send them this section and ask for the Client ID + Tenant ID in return.
-
-### 2. Confirm access to the shared mailbox
-
-The signed-in user must have **Read** permission on the shared mailbox in Exchange — the same access you need to open it in Outlook. Without that, Graph will return 403 even with `Mail.Read.Shared` granted.
-
-> **Already using the shared mailbox in Outlook?** You're done with this step — if the mailbox shows up in your Outlook folder list, you already have the Exchange permissions EmailTracker needs. Note that this does **not** replace step 1: Outlook signs in through Microsoft's own client, but a custom program like EmailTracker still needs its own app registration to call Microsoft Graph on your behalf.
-
-### 3. Install and configure
+## Setup
 
 ```bash
-# Clone / open the project folder
+# Open the project folder
 cd "ERC Project/EmailTracker"
 
 # Create a virtualenv and install
@@ -54,30 +34,27 @@ py -m venv .venv
 cp .env.example .env
 ```
 
-Edit `.env` and fill in:
+Edit `.env` and set:
 
-- `TENANT_ID` — the Directory (tenant) ID from step 1
-- `CLIENT_ID` — the Application (client) ID from step 1
-- `SHARED_MAILBOX` — the UPN of the shared mailbox, e.g. `support@erc.ph`
+- `SHARED_MAILBOX` — the **primary SMTP address** of the shared mailbox, e.g. `support@erc.ph`. This must match what Outlook knows it as. (In Outlook, right-click the shared mailbox in the folder pane → Data File Properties to confirm.)
 
-Leave the other values at their defaults unless you need to change them.
+Optional tweaks:
 
-### 4. Run the service
+- `INITIAL_SYNC_DAYS` — on first run, how far back to import messages (default 30 days). Increase if you want more history up front; decrease to start lean.
+- `POLL_INTERVAL_SECONDS` — polling cadence (default 60).
+- `WEB_HOST` / `WEB_PORT` — where the dashboard binds (default `127.0.0.1:8000`).
+
+## Running
+
+**Step 1: Make sure Outlook is open** on the same machine and the shared mailbox is visible in the folder list.
+
+**Step 2: Start the service:**
 
 ```bash
 .venv/Scripts/python.exe -m uvicorn emailtracker.web.app:app --host 127.0.0.1 --port 8000
 ```
 
-**First run only:** the terminal will print a Microsoft sign-in URL and a device code, e.g.
-
-```
-EmailTracker: sign-in required
-To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code ABCD-1234 to authenticate.
-```
-
-Open that URL in a browser, enter the code, and sign in as a user who has access to the shared mailbox. After you finish, the poller starts immediately and subsequent runs won't prompt again (credentials are cached in `.token_cache.json`).
-
-Open <http://127.0.0.1:8000> in your browser — the dashboard should load and populate within ~60 seconds.
+On first start, Windows may pop up a security prompt asking whether to allow programmatic access to Outlook — click **Allow**. After that, open <http://127.0.0.1:8000> in your browser. The dashboard should populate within ~60 seconds.
 
 ## Using the dashboard
 
@@ -90,20 +67,12 @@ Open <http://127.0.0.1:8000> in your browser — the dashboard should load and p
   - Disable a rule with the **Disable** button; delete with **Delete**. With no rules enabled, the feed shows every tracked message.
 - **Status bar** — poller health, tracked message count, last successful sync timestamp.
 
-## How it works
-
-- A single process runs FastAPI + a background asyncio task (the poller) together.
-- The poller calls Microsoft Graph **delta queries** against the shared mailbox's Inbox and Sent Items folders every `POLL_INTERVAL_SECONDS` (default 60s). Delta queries return only what changed since the last sync token, so normal operation is very cheap — most ticks download zero messages.
-- Each tracked message is stored in a local SQLite database (`emailtracker.db`). Only metadata is persisted — bodies and attachments are never downloaded.
-- If the delta token expires (Graph returns 410), the poller automatically does a full resync of that folder on the next tick.
-- On Graph errors, the poller logs the error to the status bar, backs off exponentially (capped at 5 minutes), and keeps running.
-
 ## Data stored
 
 SQLite file `emailtracker.db`, three tables:
 
-- `messages` — one row per tracked email (id, conversationId, direction, sender, recipients, subject, timestamps)
-- `sync_state` — per-folder delta link, last successful sync, last error
+- `messages` — one row per tracked email (Outlook EntryID, ConversationID, direction, sender, recipients, subject, received time)
+- `sync_state` — per-folder last-successful-sync watermark and last error
 - `filter_rules` — your saved focus rules
 
 All writes happen inside transactions. Back up the file any time the service is stopped — it's the entire state.
@@ -112,12 +81,14 @@ All writes happen inside transactions. Back up the file any time the service is 
 
 | Symptom | Likely cause / fix |
 |---|---|
-| Poller status is red, `last_error` mentions `AADSTS` / `invalid_client` | `.env` has the wrong `TENANT_ID` / `CLIENT_ID`, or "Allow public client flows" is not enabled in the app registration. |
-| `403 Forbidden` from Graph | The signed-in user doesn't have mailbox access. Have an admin add them in Exchange, or grant `Mail.Read.Shared` admin consent. |
-| Feed stays empty after first run | The poller hasn't completed its first tick yet (wait ~60s), or the shared mailbox is genuinely empty. Check `GET /status`. |
-| `.token_cache.json` deleted or corrupted | The next run will re-prompt for device-code sign-in. Safe to delete and retry. |
+| Status bar red, `last_error` says "Could not attach to Outlook" | Outlook isn't running. Open the Classic Outlook desktop client. |
+| Status bar red, `last_error` says "could not resolve" | `SHARED_MAILBOX` in `.env` doesn't match the primary SMTP of the shared mailbox — or the mailbox isn't added to your Outlook profile. Verify via right-click → Data File Properties in Outlook. |
+| Status bar red, `last_error` says "Read permission" | Your Outlook account can see the mailbox but doesn't have read rights on Inbox / Sent Items. Ask the mailbox owner to add you in Exchange. |
+| Feed stays empty after first run | The poller hasn't completed its first tick yet (wait ~60s), or the shared mailbox has no mail in the last `INITIAL_SYNC_DAYS`. Check `GET /status`. |
+| Outlook prompts "Allow programmatic access?" on every start | Happens when antivirus is managing Outlook's trust center. In Outlook → File → Options → Trust Center → Programmatic Access, adjust the setting (requires admin for the "never warn" option). |
 | Port 8000 already in use | Change `WEB_PORT` in `.env`, or pass `--port NNNN` to `uvicorn`. |
+| I'm on **New Outlook** and it doesn't work | New Outlook is a different app that doesn't expose COM. Switch back to Classic Outlook via the "New Outlook" toggle in the title bar, or use File → Options. |
 
 ## Stopping the service
 
-`Ctrl+C` in the terminal. The poller's current tick finishes (up to a few seconds), then the DB and HTTP client close cleanly.
+`Ctrl+C` in the terminal. The poller's current tick finishes (a few seconds at most), then the DB closes cleanly. Your data stays in `emailtracker.db` for the next run.

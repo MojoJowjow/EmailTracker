@@ -1,5 +1,5 @@
 {% if not messages %}
-<tr class="empty"><td colspan="5">No messages match the current filters.</td></tr>
+<tr class="empty"><td colspan="7">No messages match the current filters.</td></tr>
 {% else %}
 {% for m in messages %}
 <tr class="row-{{ m.direction }}"
@@ -18,6 +18,10 @@
   </td>
   <td class="recipients">{{ format_recipients(m.to_recipients) }}</td>
   <td class="subject">{{ m.subject }}</td>
+  <td class="attachment-col">{% if m.has_attachments %}<span class="attachment-badge">Letter</span>{% endif %}</td>
+  <td class="status-col">
+    {% if m.requires_reply %}<span class="needs-reply-badge">Requires reply from F.S. Juan</span>{% endif %}
+  </td>
   <td class="when">{{ m.received_at or '' }}</td>
 </tr>
 {% endfor %}

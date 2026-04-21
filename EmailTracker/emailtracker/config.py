@@ -11,12 +11,10 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 @dataclass(frozen=True)
 class Settings:
-    tenant_id: str
-    client_id: str
     shared_mailbox: str
     poll_interval_seconds: int
+    initial_sync_days: int
     db_path: Path
-    token_cache_path: Path
     web_host: str
     web_port: int
 
@@ -39,12 +37,10 @@ def _resolve(path_str: str) -> Path:
 def load_settings() -> Settings:
     load_dotenv(_PROJECT_ROOT / ".env")
     return Settings(
-        tenant_id=_require("TENANT_ID"),
-        client_id=_require("CLIENT_ID"),
         shared_mailbox=_require("SHARED_MAILBOX"),
         poll_interval_seconds=int(os.environ.get("POLL_INTERVAL_SECONDS", "60")),
+        initial_sync_days=int(os.environ.get("INITIAL_SYNC_DAYS", "30")),
         db_path=_resolve(os.environ.get("DB_PATH", "./emailtracker.db")),
-        token_cache_path=_resolve(os.environ.get("TOKEN_CACHE_PATH", "./.token_cache.json")),
         web_host=os.environ.get("WEB_HOST", "127.0.0.1"),
         web_port=int(os.environ.get("WEB_PORT", "8000")),
     )

@@ -1,0 +1,34 @@
+<span data-days="{{ days }}" data-date="{{ date or '' }}" hidden></span>
+<div class="day-filter">
+  <span class="day-label">Period:</span>
+  <button class="day-btn {% if days == 0 and not date %}active{% endif %}"
+          hx-get="/metrics?days=0" hx-target="#metrics-panel" hx-swap="innerHTML">All</button>
+  <button class="day-btn {% if days == 1 and not date %}active{% endif %}"
+          hx-get="/metrics?days=1" hx-target="#metrics-panel" hx-swap="innerHTML">Today</button>
+  <span class="day-label" style="margin-left:12px;">Date:</span>
+  <input type="date" class="date-picker {% if date %}active{% endif %}" value="{{ date or '' }}"
+         hx-get="/metrics" hx-target="#metrics-panel" hx-swap="innerHTML"
+         hx-trigger="change changed delay:500ms" name="date" />
+</div>
+<div class="metrics-cards">
+  <div class="metric-card metric-pending">
+    <div class="metric-val">{{ metrics.pending_replies }}</div>
+    <div class="metric-label">Pending Replies</div>
+  </div>
+  <div class="metric-card metric-replied">
+    <div class="metric-val">{{ metrics.replied }}</div>
+    <div class="metric-label">Replied</div>
+  </div>
+  <div class="metric-card metric-inbound">
+    <div class="metric-val">{{ metrics.inbound }}</div>
+    <div class="metric-label">Inbound</div>
+  </div>
+  <div class="metric-card metric-outbound">
+    <div class="metric-val">{{ metrics.outbound }}</div>
+    <div class="metric-label">Outbound</div>
+  </div>
+  <div class="metric-card metric-total">
+    <div class="metric-val">{{ metrics.total }}</div>
+    <div class="metric-label">Total</div>
+  </div>
+</div>

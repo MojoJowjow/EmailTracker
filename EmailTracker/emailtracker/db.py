@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
 
@@ -22,6 +22,8 @@ CREATE TABLE IF NOT EXISTS messages (
     received_at      TEXT,
     is_reply         INTEGER NOT NULL DEFAULT 0,
     is_forward       INTEGER NOT NULL DEFAULT 0,
+    has_attachments  INTEGER NOT NULL DEFAULT 0,
+    requires_reply   INTEGER NOT NULL DEFAULT 0,
     ingested_at      TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
@@ -30,7 +32,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_address);
 
 CREATE TABLE IF NOT EXISTS sync_state (
     folder           TEXT PRIMARY KEY,
-    delta_link       TEXT,
+    watermark        TEXT,
     last_success_at  TEXT,
     last_error       TEXT
 );
@@ -62,6 +64,15 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    # Migrations: add columns that may not exist in older databases
+    for col in [
+        "has_attachments INTEGER NOT NULL DEFAULT 0",
+        "requires_reply INTEGER NOT NULL DEFAULT 0",
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE messages ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
 
 @contextmanager
@@ -83,12 +94,12 @@ def upsert_message(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
             id, conversation_id, direction, folder,
             sender_name, sender_address,
             to_recipients, cc_recipients, bcc_recipients,
-            subject, received_at, is_reply, is_forward, ingested_at
+            subject, received_at, is_reply, is_forward, has_attachments, requires_reply, ingested_at
         ) VALUES (
             :id, :conversation_id, :direction, :folder,
             :sender_name, :sender_address,
             :to_recipients, :cc_recipients, :bcc_recipients,
-            :subject, :received_at, :is_reply, :is_forward, :ingested_at
+            :subject, :received_at, :is_reply, :is_forward, :has_attachments, :requires_reply, :ingested_at
         )
         ON CONFLICT(id) DO UPDATE SET
             conversation_id = excluded.conversation_id,
@@ -102,7 +113,9 @@ def upsert_message(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
             subject         = excluded.subject,
             received_at     = excluded.received_at,
             is_reply        = excluded.is_reply,
-            is_forward      = excluded.is_forward
+            is_forward      = excluded.is_forward,
+            has_attachments = excluded.has_attachments,
+            requires_reply  = excluded.requires_reply
         """,
         row,
     )
@@ -110,38 +123,34 @@ def upsert_message(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
 
 def get_sync_state(conn: sqlite3.Connection, folder: str) -> sqlite3.Row | None:
     return conn.execute(
-        "SELECT folder, delta_link, last_success_at, last_error FROM sync_state WHERE folder = ?",
+        "SELECT folder, watermark, last_success_at, last_error FROM sync_state WHERE folder = ?",
         (folder,),
     ).fetchone()
 
 
-def save_sync_success(conn: sqlite3.Connection, folder: str, delta_link: str | None) -> None:
+def save_sync_success(conn: sqlite3.Connection, folder: str, watermark: str | None) -> None:
     conn.execute(
         """
-        INSERT INTO sync_state (folder, delta_link, last_success_at, last_error)
+        INSERT INTO sync_state (folder, watermark, last_success_at, last_error)
         VALUES (?, ?, ?, NULL)
         ON CONFLICT(folder) DO UPDATE SET
-            delta_link      = excluded.delta_link,
+            watermark       = excluded.watermark,
             last_success_at = excluded.last_success_at,
             last_error      = NULL
         """,
-        (folder, delta_link, now_utc_iso()),
+        (folder, watermark, now_utc_iso()),
     )
 
 
 def save_sync_error(conn: sqlite3.Connection, folder: str, error: str) -> None:
     conn.execute(
         """
-        INSERT INTO sync_state (folder, delta_link, last_success_at, last_error)
+        INSERT INTO sync_state (folder, watermark, last_success_at, last_error)
         VALUES (?, NULL, NULL, ?)
         ON CONFLICT(folder) DO UPDATE SET last_error = excluded.last_error
         """,
         (folder, error),
     )
-
-
-def clear_delta_link(conn: sqlite3.Connection, folder: str) -> None:
-    conn.execute("UPDATE sync_state SET delta_link = NULL WHERE folder = ?", (folder,))
 
 
 def list_filter_rules(conn: sqlite3.Connection, only_enabled: bool = False) -> list[sqlite3.Row]:
@@ -200,6 +209,103 @@ def get_status(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+def get_metrics(
+    conn: sqlite3.Connection,
+    days: int | None = None,
+    rules: Sequence[sqlite3.Row] | None = None,
+    date: str | None = None,
+) -> dict[str, Any]:
+    """Compute dashboard metrics, optionally filtered to the last N days, a specific date, and active rules."""
+    conditions: list[str] = []
+    params: list[Any] = []
+
+    if date:
+        # Specific date filter: e.g. "2026-04-15" → that whole day
+        conditions.append("received_at >= ?")
+        params.append(f"{date}T00:00:00+00:00")
+        conditions.append("received_at < ?")
+        next_day = (datetime.strptime(date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        params.append(f"{next_day}T00:00:00+00:00")
+    elif days is not None and days > 0:
+        # Start of today (midnight) minus (days-1) to get the period start.
+        # DB timestamps are stored as local time with +00:00 suffix, so compare
+        # against local midnight directly (no UTC conversion).
+        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        period_start = today_start - timedelta(days=days - 1)
+        cutoff = period_start.isoformat()
+        conditions.append("received_at > ?")
+        params.append(cutoff)
+
+    # Apply filter rules (same logic as feed)
+    if rules is not None:
+        filter_sql, filter_params = build_filter_clause(rules)
+        if filter_sql != "1=1":
+            conditions.append(filter_sql)
+            params.extend(filter_params)
+
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+
+    # Total inbound / outbound
+    row = conn.execute(
+        f"SELECT "
+        f"  COUNT(*) AS total, "
+        f"  SUM(CASE WHEN direction='in' THEN 1 ELSE 0 END) AS inbound, "
+        f"  SUM(CASE WHEN direction='out' THEN 1 ELSE 0 END) AS outbound "
+        f"FROM messages{where}",
+        params,
+    ).fetchone()
+    total = int(row["total"]) if row else 0
+    inbound = int(row["inbound"] or 0) if row else 0
+    outbound = int(row["outbound"] or 0) if row else 0
+
+    # Pending replies: inbound messages (matching filters + time) with no outbound reply
+    pending_conditions = ["m.direction = 'in'"]
+    pending_params: list[Any] = []
+
+    if date:
+        pending_conditions.append("m.received_at >= ?")
+        pending_params.append(f"{date}T00:00:00+00:00")
+        pending_conditions.append("m.received_at < ?")
+        next_day = (datetime.strptime(date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        pending_params.append(f"{next_day}T00:00:00+00:00")
+    elif days is not None and days > 0:
+        pending_conditions.append("m.received_at > ?")
+        pending_params.append(cutoff)
+
+    if rules is not None:
+        filter_sql, filter_params = build_filter_clause(rules)
+        if filter_sql != "1=1":
+            # Qualify column references for the outer table alias 'm'
+            qualified = filter_sql.replace("sender_address", "m.sender_address").replace("subject", "m.subject")
+            pending_conditions.append(qualified)
+            pending_params.extend(filter_params)
+
+    pending_sql = (
+        "SELECT COUNT(*) AS c FROM messages m WHERE "
+        + " AND ".join(pending_conditions)
+        + " AND NOT EXISTS ("
+        "    SELECT 1 FROM messages o "
+        "    WHERE o.conversation_id = m.conversation_id "
+        "    AND o.direction = 'out' "
+        "    AND o.is_reply = 1 "
+        "    AND o.received_at > m.received_at"
+        ")"
+    )
+    pending_row = conn.execute(pending_sql, pending_params).fetchone()
+    pending = int(pending_row["c"]) if pending_row else 0
+
+    # Replied count
+    replied = inbound - pending
+
+    return {
+        "total": total,
+        "inbound": inbound,
+        "outbound": outbound,
+        "pending_replies": pending,
+        "replied": replied,
+    }
+
+
 def _pattern_to_like(pattern: str) -> str:
     if "*" in pattern:
         return pattern.replace("*", "%")
@@ -243,10 +349,25 @@ def search_messages(
     rules: Sequence[sqlite3.Row],
     query: str | None,
     limit: int = 100,
+    days: int | None = None,
+    date: str | None = None,
 ) -> list[sqlite3.Row]:
     filter_sql, filter_params = build_filter_clause(rules)
     where_parts = [filter_sql]
     params: list[Any] = list(filter_params)
+
+    # Date/period filtering
+    if date:
+        where_parts.append("received_at >= ?")
+        params.append(f"{date}T00:00:00+00:00")
+        next_day = (datetime.strptime(date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        where_parts.append("received_at < ?")
+        params.append(f"{next_day}T00:00:00+00:00")
+    elif days is not None and days > 0:
+        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        period_start = today_start - timedelta(days=days - 1)
+        where_parts.append("received_at > ?")
+        params.append(period_start.isoformat())
 
     if query:
         where_parts.append(
@@ -262,7 +383,7 @@ def search_messages(
     sql = (
         "SELECT id, conversation_id, direction, folder, sender_name, sender_address, "
         "to_recipients, cc_recipients, bcc_recipients, subject, received_at, "
-        "is_reply, is_forward, ingested_at "
+        "is_reply, is_forward, has_attachments, requires_reply, ingested_at "
         "FROM messages WHERE "
         + " AND ".join(where_parts)
         + " ORDER BY received_at DESC LIMIT ?"
@@ -276,9 +397,9 @@ def get_conversation(conn: sqlite3.Connection, conversation_id: str) -> list[sql
         conn.execute(
             "SELECT id, conversation_id, direction, folder, sender_name, sender_address, "
             "to_recipients, cc_recipients, bcc_recipients, subject, received_at, "
-            "is_reply, is_forward, ingested_at "
+            "is_reply, is_forward, has_attachments, requires_reply, ingested_at "
             "FROM messages WHERE conversation_id = ? "
-            "ORDER BY received_at ASC",
+            "ORDER BY received_at DESC",
             (conversation_id,),
         )
     )

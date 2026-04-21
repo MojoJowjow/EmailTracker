@@ -24,11 +24,33 @@
   </div>
 </section>
 
-<section class="grid">
+<input type="hidden" id="filter-days" name="filter_days" value="{{ days }}" />
+<input type="hidden" id="filter-date" name="filter_date" value="{{ date or '' }}" />
+
+<section class="metrics-section">
+  <div class="metrics-header">
+    <h2>Metrics</h2>
+  </div>
+  <div id="metrics-panel"
+       hx-on::after-settle="
+         var panel = document.getElementById('metrics-panel');
+         var d = panel.querySelector('[data-days]');
+         var dt = panel.querySelector('[data-date]');
+         if(d) document.getElementById('filter-days').value = d.dataset.days;
+         if(dt) document.getElementById('filter-date').value = dt.dataset.date;
+         htmx.trigger('#feed-rows','filterChanged');
+       ">
+    {% include "_metrics.html" %}
+  </div>
+</section>
+
+<section>
   <div class="card feed-card">
     <div class="card-header">
       <h2>Live feed</h2>
-      <form class="search" hx-get="/feed" hx-target="#feed-rows" hx-trigger="input changed delay:300ms, submit">
+      <form class="search" hx-get="/feed" hx-target="#feed-rows"
+            hx-include="[name='filter_days'],[name='filter_date']"
+            hx-trigger="input changed delay:300ms, submit">
         <input type="search" name="q" value="{{ query }}" placeholder="Search sender, subject, recipients..." />
       </form>
     </div>
@@ -40,12 +62,15 @@
             <th>From</th>
             <th>To</th>
             <th>Subject</th>
+            <th>Attach</th>
+            <th>Status</th>
             <th>When</th>
           </tr>
         </thead>
         <tbody id="feed-rows"
                hx-get="/feed"
-               hx-trigger="every 10s"
+               hx-include="[name='q'],[name='filter_days'],[name='filter_date']"
+               hx-trigger="every 10s, filterChanged"
                hx-swap="innerHTML">
           {% include "_feed_rows.html" %}
         </tbody>
@@ -53,27 +78,5 @@
     </div>
   </div>
 
-  <div class="card rules-card">
-    <div class="card-header">
-      <h2>Filter rules</h2>
-    </div>
-    <form class="rule-form"
-          hx-post="/rules"
-          hx-target="#rules-panel"
-          hx-swap="innerHTML"
-          hx-on::after-request="if(event.detail.successful) this.reset()">
-      <input type="text" name="name" placeholder="Rule name (e.g. Acme Corp)" required />
-      <input type="text" name="sender_pattern" placeholder="Sender contains (or *@acme.com)" />
-      <input type="text" name="subject_pattern" placeholder="Subject contains (or *invoice*)" />
-      <button type="submit">Add rule</button>
-    </form>
-    <div id="rules-panel">
-      {% include "_rules_panel.html" %}
-    </div>
-    <p class="hint">
-      No rules enabled → feed shows every tracked message.<br>
-      Multiple enabled rules are OR'd; within a rule, sender + subject are AND'd.
-    </p>
-  </div>
 </section>
 {% endblock %}
