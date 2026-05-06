@@ -68,7 +68,14 @@ def _format_recipients(recipients: list[dict[str, str]], max_shown: int = 3) -> 
 async def dashboard(request: Request, days: int = 0, date: str = "") -> Response:
     conn = _conn(request)
     rules = db.list_filter_rules(conn)
-    messages = [_row_to_message(r) for r in db.search_messages(conn, rules, None, limit=100)]
+    messages = [
+        _row_to_message(r)
+        for r in db.search_messages(
+            conn, rules, None, limit=100,
+            days=days if days > 0 else None,
+            date=date or None,
+        )
+    ]
     _mark_awaiting_reply(conn, messages)
     status = db.get_status(conn)
     status["last_sync"] = _format_dt(status.get("last_sync"))

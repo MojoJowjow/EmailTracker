@@ -230,9 +230,8 @@ def get_metrics(
         next_day = (datetime.strptime(date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
         params.append(f"{next_day}T00:00:00+00:00")
     elif days is not None and days > 0:
-        # Start of today (midnight) minus (days-1) to get the period start.
-        # DB timestamps are stored as local time with +00:00 suffix, so compare
-        # against local midnight directly (no UTC conversion).
+        # Start of today (UTC midnight) minus (days-1) to get the period start.
+        # DB timestamps are stored as UTC ISO-8601 (see outlook_reader._to_utc).
         today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
         period_start = today_start - timedelta(days=days - 1)
         cutoff = period_start.isoformat()

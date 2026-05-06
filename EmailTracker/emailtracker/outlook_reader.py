@@ -5,7 +5,6 @@ COM apartment-threaded objects cannot cross thread boundaries.
 """
 from __future__ import annotations
 
-import io
 import json
 import logging
 import re
@@ -62,7 +61,8 @@ def _extract_text_from_attachment(file_path: Path) -> str:
     return ""
 
 
-# Patterns that indicate the start of a signature or reply chain
+# Single-line patterns that indicate the start of a signature or reply chain.
+# These are searched line-by-line, so they must not span newlines.
 _SIGNATURE_MARKERS = [
     r"^--\s*$",                    # -- (standard sig separator)
     r"^_{3,}",                     # ___ line
@@ -81,32 +81,39 @@ _SIGNATURE_MARKERS = [
     r"^Sent from my ",
     r"^Sent from Mail for ",
     r"^Get Outlook for ",
-    r"^From:.*\nSent:.*\n",        # Outlook reply header
-    r"^On .* wrote:$",             # Gmail-style reply header
+    r"^On .* wrote:\s*$",          # Gmail-style reply header
     r"^DISCLAIMER",
     r"^CONFIDENTIALITY",
     r"^This email and any",
     r"^This message is intended",
     r"^NOTE: This e-mail",
 ]
-_SIG_RE = re.compile("|".join(f"(?:{p})" for p in _SIGNATURE_MARKERS), re.IGNORECASE | re.MULTILINE)
+_SIG_RE = re.compile("|".join(f"(?:{p})" for p in _SIGNATURE_MARKERS), re.IGNORECASE)
+
+# Outlook-style reply header spans multiple lines (From: ... \n Sent: ...),
+# so it has to be matched against the whole body before line-splitting.
+_OUTLOOK_REPLY_HEADER_RE = re.compile(
+    r"^From:.*\r?\n\s*Sent:.*$",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 def _clean_body(body: str) -> str:
     """Extract only the main message content, stripping signatures, disclaimers, and reply chains."""
     if not body:
         return ""
-    # Remove excessive blank lines
-    lines = body.strip().splitlines()
-    # Find the first signature/reply marker and cut there
+    body = body.strip()
+    # Cut at the first Outlook-style reply header (multi-line "From: ...\nSent: ...").
+    m = _OUTLOOK_REPLY_HEADER_RE.search(body)
+    if m:
+        body = body[: m.start()]
+    # Find the first single-line signature/reply marker and cut there.
     clean_lines = []
-    for i, line in enumerate(lines):
+    for line in body.splitlines():
         if _SIG_RE.search(line):
             break
         clean_lines.append(line)
-    # Collapse multiple blank lines into one
     result = "\n".join(clean_lines).strip()
-    # Trim to reasonable length
     if len(result) > 1000:
         result = result[:1000]
     return result
