@@ -50,6 +50,7 @@ def _row_to_message(row: sqlite3.Row) -> dict[str, Any]:
         "is_forward": bool(row["is_forward"]),
         "has_attachments": bool(row["has_attachments"]),
         "requires_reply": bool(row["requires_reply"]),
+        "body_preview": row["body_preview"] or "",
     }
 
 
@@ -68,7 +69,7 @@ async def dashboard(request: Request, days: int = 0, date: str = "") -> Response
     conn = _conn(request)
     rules = db.list_filter_rules(conn)
     messages = [_row_to_message(r) for r in db.search_messages(conn, rules, None, limit=100)]
-    _annotate_feed_status(conn, messages)
+    _mark_awaiting_reply(conn, messages)
     status = db.get_status(conn)
     status["last_sync"] = _format_dt(status.get("last_sync"))
     metrics = db.get_metrics(conn, days if days > 0 else None, rules=rules, date=date or None)
@@ -100,32 +101,27 @@ async def metrics_panel(request: Request, days: int = 0, date: str = "") -> Resp
     )
 
 
-def _annotate_feed_status(conn: sqlite3.Connection, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Add 'needs_reply' flag to inbound messages that have no outbound reply in their conversation."""
-    if not messages:
-        return messages
-    inbound = [m for m in messages if m["direction"] == "in"]
-    if not inbound:
+
+def _mark_awaiting_reply(conn: sqlite3.Connection, messages: list[dict[str, Any]]) -> None:
+    """Set 'awaiting_reply' on messages that require a reply from FSJ but haven't been replied to yet."""
+    needs = [m for m in messages if m["requires_reply"] and m["direction"] == "in"]
+    if not needs:
         for m in messages:
-            m["needs_reply"] = False
-        return messages
-    # Get conversation_ids that have at least one outbound reply
-    conv_ids = list({m["conversation_id"] for m in inbound})
+            m["awaiting_reply"] = False
+        return
+    conv_ids = list({m["conversation_id"] for m in needs})
     placeholders = ",".join("?" * len(conv_ids))
-    replied_convs = set()
     rows = conn.execute(
         f"SELECT DISTINCT conversation_id FROM messages "
         f"WHERE conversation_id IN ({placeholders}) AND direction = 'out' AND is_reply = 1",
         conv_ids,
     ).fetchall()
-    for r in rows:
-        replied_convs.add(r["conversation_id"])
+    replied_convs = {r["conversation_id"] for r in rows}
     for m in messages:
-        if m["direction"] == "in":
-            m["needs_reply"] = m["conversation_id"] not in replied_convs
+        if m["requires_reply"] and m["direction"] == "in":
+            m["awaiting_reply"] = m["conversation_id"] not in replied_convs
         else:
-            m["needs_reply"] = False
-    return messages
+            m["awaiting_reply"] = False
 
 
 @router.get("/feed", response_class=HTMLResponse)
@@ -143,7 +139,7 @@ async def feed(
             date=filter_date or None,
         )
     ]
-    _annotate_feed_status(conn, messages)
+    _mark_awaiting_reply(conn, messages)
     return _templates(request).TemplateResponse(
         request,
         "_feed_rows.html",
@@ -206,6 +202,7 @@ async def thread(request: Request, conversation_id: str) -> Response:
     if not rows:
         raise HTTPException(status_code=404, detail="Conversation not found")
     messages = _annotate_reply_status([_row_to_message(r) for r in rows])
+    _mark_awaiting_reply(conn, messages)
     # Thread subject from the first message
     thread_subject = messages[0]["subject"] if messages else ""
     return _templates(request).TemplateResponse(

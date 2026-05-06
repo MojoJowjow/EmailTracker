@@ -8,6 +8,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,8 +18,31 @@ from . import db
 
 log = logging.getLogger(__name__)
 
-# Target name for reply detection in attachments
-_REPLY_TARGET = "francis saturnino juan"
+# Target names/offices for reply detection
+_REPLY_TARGETS = [
+    "office of the chairperson",
+    "francis saturnino juan",
+    "noel salavanera",
+]
+
+# Keywords in email body that indicate an attached letter should be checked
+_LETTER_KEYWORDS = [
+    "attached letter",
+    "attached herewith",
+    "please find attached",
+    "kindly check the attached",
+    "please check the attached",
+    "enclosed letter",
+    "for your review",
+    "for your consideration",
+    "for your action",
+    "for your reference",
+    "see attached",
+    "pls see attached",
+    "please see attached",
+    "attached for your",
+    "letter attached",
+]
 
 
 def _extract_text_from_attachment(file_path: Path) -> str:
@@ -38,8 +62,86 @@ def _extract_text_from_attachment(file_path: Path) -> str:
     return ""
 
 
-def _check_attachments_for_target(item: Any) -> bool:
-    """Check if any attachment contains the target name (Francis Saturnino Juan)."""
+# Patterns that indicate the start of a signature or reply chain
+_SIGNATURE_MARKERS = [
+    r"^--\s*$",                    # -- (standard sig separator)
+    r"^_{3,}",                     # ___ line
+    r"^-{3,}",                     # --- line
+    r"^Regards,?\s*$",
+    r"^Best regards,?\s*$",
+    r"^Kind regards,?\s*$",
+    r"^Warm regards,?\s*$",
+    r"^Sincerely,?\s*$",
+    r"^Thank you,?\s*$",
+    r"^Thanks,?\s*$",
+    r"^Thanks and regards,?\s*$",
+    r"^Respectfully,?\s*$",
+    r"^Respectfully yours,?\s*$",
+    r"^Very respectfully,?\s*$",
+    r"^Sent from my ",
+    r"^Sent from Mail for ",
+    r"^Get Outlook for ",
+    r"^From:.*\nSent:.*\n",        # Outlook reply header
+    r"^On .* wrote:$",             # Gmail-style reply header
+    r"^DISCLAIMER",
+    r"^CONFIDENTIALITY",
+    r"^This email and any",
+    r"^This message is intended",
+    r"^NOTE: This e-mail",
+]
+_SIG_RE = re.compile("|".join(f"(?:{p})" for p in _SIGNATURE_MARKERS), re.IGNORECASE | re.MULTILINE)
+
+
+def _clean_body(body: str) -> str:
+    """Extract only the main message content, stripping signatures, disclaimers, and reply chains."""
+    if not body:
+        return ""
+    # Remove excessive blank lines
+    lines = body.strip().splitlines()
+    # Find the first signature/reply marker and cut there
+    clean_lines = []
+    for i, line in enumerate(lines):
+        if _SIG_RE.search(line):
+            break
+        clean_lines.append(line)
+    # Collapse multiple blank lines into one
+    result = "\n".join(clean_lines).strip()
+    # Trim to reasonable length
+    if len(result) > 1000:
+        result = result[:1000]
+    return result
+
+
+def _text_mentions_targets(text: str) -> bool:
+    """Check if text contains any of the target names/offices."""
+    text_lower = text.lower()
+    return any(target in text_lower for target in _REPLY_TARGETS)
+
+
+def _body_instructs_to_check_letter(body: str) -> bool:
+    """Check if the email body instructs to check an attached letter."""
+    body_lower = body.lower()
+    return any(kw in body_lower for kw in _LETTER_KEYWORDS)
+
+
+def _check_requires_reply(item: Any) -> bool:
+    """Determine if this email requires a reply from the target people.
+
+    Logic:
+    1. Read the email body
+    2. If body instructs to check the letter (attachment), check attachment content
+    3. If attachment is addressed to Office of the Chairperson, Francis Saturnino Juan,
+       or Noel Salavanera → requires reply
+    """
+    body = (_safe(item, "Body", "") or "").strip()
+    if not body:
+        return False
+
+    # Step 1: Check if the body itself instructs to check an attached letter
+    if not _body_instructs_to_check_letter(body):
+        return False
+
+    # Step 2: Body says to check attachment — now read the attachments
     try:
         attachments = getattr(item, "Attachments", None)
         if not attachments:
@@ -53,15 +155,15 @@ def _check_attachments_for_target(item: Any) -> bool:
             suffix = Path(filename).suffix.lower()
             if suffix not in (".pdf", ".docx", ".doc"):
                 continue
-            # Save to temp file, extract text, check for target name
+            # Save to temp file, extract text, check for target names
             with tempfile.TemporaryDirectory() as tmpdir:
                 save_path = Path(tmpdir) / filename
                 att.SaveAsFile(str(save_path))
                 text = _extract_text_from_attachment(save_path)
-                if _REPLY_TARGET in text.lower():
+                if _text_mentions_targets(text):
                     return True
     except Exception:
-        log.debug("Error checking attachments for target", exc_info=True)
+        log.debug("Error checking attachments for targets", exc_info=True)
     return False
 
 
@@ -314,6 +416,7 @@ class OutlookReader:
             "is_reply": 1 if subject_lower.startswith("re:") else 0,
             "is_forward": 1 if subject_lower.startswith(("fw:", "fwd:")) else 0,
             "has_attachments": 1 if int(getattr(_safe(item, "Attachments"), "Count", 0) or 0) > 0 else 0,
-            "requires_reply": 1 if _check_attachments_for_target(item) else 0,
+            "requires_reply": 1 if _check_requires_reply(item) else 0,
+            "body_preview": _clean_body((_safe(item, "Body", "") or "")),
             "ingested_at": db.now_utc_iso(),
         }

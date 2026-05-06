@@ -32,7 +32,11 @@
       "Bash(curl -s \"http://127.0.0.1:8000/feed?filter_date=2026-04-15\")",
       "Bash(curl -s \"http://127.0.0.1:8000/feed?filter_days=1\")",
       "Bash(curl -s -o /dev/null -w \"%{http_code}\" \"http://127.0.0.1:8000/thread/B9C97C27A8A2D84C83CA069D9F174ECD\")",
-      "Bash(.venv/Scripts/pip.exe install *)"
+      "Bash(.venv/Scripts/pip.exe install *)",
+      "Bash(.venv/Scripts/python.exe -c \"import sqlite3; conn = sqlite3.connect\\('emailtracker.db'\\); row = conn.execute\\('SELECT COUNT\\(*\\) as c FROM messages WHERE body_preview != \\\\\"\\\\\"'\\).fetchone\\(\\); exit\\(0 if row[0] > 0 else 1\\)\")",
+      "Bash(taskkill //PID 6508 //F)",
+      "Bash(taskkill //PID 27024 //F)",
+      "Bash(taskkill //PID 44596 //F)"
     ]
   }
 }

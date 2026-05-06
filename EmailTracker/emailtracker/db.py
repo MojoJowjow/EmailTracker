@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS messages (
     is_forward       INTEGER NOT NULL DEFAULT 0,
     has_attachments  INTEGER NOT NULL DEFAULT 0,
     requires_reply   INTEGER NOT NULL DEFAULT 0,
+    body_preview     TEXT NOT NULL DEFAULT '',
     ingested_at      TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
@@ -68,6 +69,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     for col in [
         "has_attachments INTEGER NOT NULL DEFAULT 0",
         "requires_reply INTEGER NOT NULL DEFAULT 0",
+        "body_preview TEXT NOT NULL DEFAULT ''",
     ]:
         try:
             conn.execute(f"ALTER TABLE messages ADD COLUMN {col}")
@@ -94,12 +96,12 @@ def upsert_message(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
             id, conversation_id, direction, folder,
             sender_name, sender_address,
             to_recipients, cc_recipients, bcc_recipients,
-            subject, received_at, is_reply, is_forward, has_attachments, requires_reply, ingested_at
+            subject, received_at, is_reply, is_forward, has_attachments, requires_reply, body_preview, ingested_at
         ) VALUES (
             :id, :conversation_id, :direction, :folder,
             :sender_name, :sender_address,
             :to_recipients, :cc_recipients, :bcc_recipients,
-            :subject, :received_at, :is_reply, :is_forward, :has_attachments, :requires_reply, :ingested_at
+            :subject, :received_at, :is_reply, :is_forward, :has_attachments, :requires_reply, :body_preview, :ingested_at
         )
         ON CONFLICT(id) DO UPDATE SET
             conversation_id = excluded.conversation_id,
@@ -115,7 +117,8 @@ def upsert_message(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
             is_reply        = excluded.is_reply,
             is_forward      = excluded.is_forward,
             has_attachments = excluded.has_attachments,
-            requires_reply  = excluded.requires_reply
+            requires_reply  = excluded.requires_reply,
+            body_preview    = excluded.body_preview
         """,
         row,
     )
@@ -383,7 +386,7 @@ def search_messages(
     sql = (
         "SELECT id, conversation_id, direction, folder, sender_name, sender_address, "
         "to_recipients, cc_recipients, bcc_recipients, subject, received_at, "
-        "is_reply, is_forward, has_attachments, requires_reply, ingested_at "
+        "is_reply, is_forward, has_attachments, requires_reply, body_preview, ingested_at "
         "FROM messages WHERE "
         + " AND ".join(where_parts)
         + " ORDER BY received_at DESC LIMIT ?"
@@ -397,7 +400,7 @@ def get_conversation(conn: sqlite3.Connection, conversation_id: str) -> list[sql
         conn.execute(
             "SELECT id, conversation_id, direction, folder, sender_name, sender_address, "
             "to_recipients, cc_recipients, bcc_recipients, subject, received_at, "
-            "is_reply, is_forward, has_attachments, requires_reply, ingested_at "
+            "is_reply, is_forward, has_attachments, requires_reply, body_preview, ingested_at "
             "FROM messages WHERE conversation_id = ? "
             "ORDER BY received_at DESC",
             (conversation_id,),

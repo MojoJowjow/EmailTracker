@@ -20,7 +20,7 @@
   <td class="subject">{{ m.subject }}</td>
   <td class="attachment-col">{% if m.has_attachments %}<span class="attachment-badge">Letter</span>{% endif %}</td>
   <td class="status-col">
-    {% if m.requires_reply %}<span class="needs-reply-badge">Requires reply from F.S. Juan</span>{% endif %}
+    {% if m.awaiting_reply %}<span class="needs-reply-badge">Awaiting reply</span>{% endif %}
   </td>
   <td class="when">{{ m.received_at or '' }}</td>
 </tr>

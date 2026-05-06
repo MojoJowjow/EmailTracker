@@ -51,7 +51,11 @@
           {% endif %}
           <div class="tl-field"><span class="tl-label">Subject</span> {{ m.subject }}</div>
           {% if m.has_attachments %}<div class="tl-field"><span class="attachment-badge">Letter Attached</span></div>{% endif %}
-          {% if m.requires_reply %}<div class="tl-field"><span class="needs-reply-badge">Requires reply from Francis Saturnino Juan</span></div>{% endif %}
+          {% if m.awaiting_reply %}<div class="tl-field"><span class="needs-reply-badge">Awaiting reply</span></div>{% endif %}
+          <details class="tl-body-details">
+            <summary class="tl-body-toggle">Show message</summary>
+            <div class="tl-body">{{ m.body_preview or 'No message content available.' }}</div>
+          </details>
         </div>
       </div>
     </div>
